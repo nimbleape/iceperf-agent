@@ -2,7 +2,6 @@ package client
 
 import (
 	"encoding/json"
-	"sync/atomic"
 	"time"
 
 	"github.com/nimbleape/iceperf-agent/config"
@@ -138,6 +137,15 @@ func (cp *ConnectionPair) createOfferer(config webrtc.Configuration) {
 			default:
 			}
 		})
+
+		dc.OnClose(func() {
+			bytesSentTotal, _ := getDataChannelBytesSent(pc, dc)
+
+			cp.LogAnswerer.WithFields(log.Fields{
+				"sentBytesTotal": bytesSentTotal,
+			}).Info("Sent total")
+		})
+
 	}
 	cp.OfferPC = pc
 }
@@ -169,15 +177,19 @@ func (cp *ConnectionPair) createAnswerer(config webrtc.Configuration) {
 					if pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
 						break
 					}
-					bps := float64(atomic.LoadUint64(&totalBytesReceived)*8) / time.Since(since).Seconds()
+					bps := 8 * float64(totalBytesReceived) / float64(time.Since(since).Seconds())
+					// bps := float64(totalBytesReceived*8) / time.Since(since).Seconds()
 					cp.LogAnswerer.WithFields(log.Fields{
-						"throughput": bps / 1024 / 1024,
+						"throughput": bps / (1024*1024),
 						"eventTime":  time.Now(),
 					}).Info("On ticker: Calculated throughput")
 				}
-				bps := float64(atomic.LoadUint64(&totalBytesReceived)*8) / time.Since(since).Seconds()
+
+				bps := 8 * float64(totalBytesReceived) / float64(time.Since(since).Seconds())
+
+				// bps := float64(totalBytesReceived*8) / time.Since(since).Seconds()
 				cp.LogAnswerer.WithFields(log.Fields{
-					"throughput":       bps / 1024 / 1024,
+					"throughput":       bps / (1024*1024),
 					"eventTime":        time.Now(),
 					"timeSinceStartMs": time.Since(since).Milliseconds(),
 				}).Info("On ticker: Calculated throughput")
@@ -191,12 +203,38 @@ func (cp *ConnectionPair) createAnswerer(config webrtc.Configuration) {
 					}).Info("Received first Packet")
 					hasRecievedData = true
 				}
-				n := len(dcMsg.Data)
-				atomic.AddUint64(&totalBytesReceived, uint64(n))
+				totalBytesReceivedTmp, ok := getDataChannelBytesReceived(pc, dc)
+				if ok {
+					totalBytesReceived = totalBytesReceivedTmp
+				}
+			})
 
+			dc.OnClose(func() {
+				bytesReceivedTotal, _ := getDataChannelBytesReceived(pc, dc)
+				cp.LogAnswerer.WithFields(log.Fields{
+					"receivedBytesTotal": bytesReceivedTotal,
+				}).Info("Received total")
 			})
 		})
 	}
 
 	cp.AnswerPC = pc
+}
+
+func getDataChannelBytesReceived(pc *webrtc.PeerConnection, dc *webrtc.DataChannel) (uint64, bool) {
+	stats := pc.GetStats()
+	dcStats, ok := stats.GetDataChannelStats(dc)
+	if !ok {
+		return 0, ok
+	}
+	return dcStats.BytesReceived, ok
+}
+
+func getDataChannelBytesSent(pc *webrtc.PeerConnection, dc *webrtc.DataChannel) (uint64, bool) {
+	stats := pc.GetStats()
+	dcStats, ok := stats.GetDataChannelStats(dc)
+	if !ok {
+		return 0, ok
+	}
+	return dcStats.BytesSent, ok
 }
